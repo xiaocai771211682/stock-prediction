@@ -3,37 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>股票分析</title>
+    <title>股票分析应用</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .container { max-width: 600px; margin: auto; }
-        input, button { padding: 10px; margin: 5px; width: 100%; box-sizing: border-box; }
-        .logs { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: scroll; }
-        .error { color: red; }
-        img { max-width: 100%; height: auto; margin-top: 10px; }
+        .log-container { max-height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>股票分析系统</h1>
-        <form method="POST">
-            <label>日期 (YYYYMMDD):</label>
-            <input type="text" name="date" value="{{ default_date }}">
-            <button type="submit">开始分析</button>
-        </form>
-        {% if error %}
-            <p class="error">{{ error }}</p>
-        {% endif %}
-        <h3>日志</h3>
-        <div class="logs">
-            {% for log in logs %}
-                <p>{{ log }}</p>
-            {% endfor %}
-        </div>
-        {% if image_data %}
-            <h3>排序结果</h3>
-            <img src="data:image/png;base64,{{ image_data }}" alt="排序结果">
-        {% endif %}
-    </div>
+    <h1>股票分析应用</h1>
+    <form method="post" action="/analyze">
+        <label for="date">选择日期 (YYYY-MM-DD):</label>
+        <input type="text" id="date" name="date" value="{{ default_date }}" required>
+        <button type="submit">开始分析与排序</button>
+    </form>
+    <h2>日志输出</h2>
+    <div class="log-container" id="log-container"></div>
+    <script>
+        function updateLogs() {
+            fetch('/logs')
+                .then(response => response.json())
+                .then(data => {
+                    const logContainer = document.getElementById('log-container');
+                    logContainer.innerHTML = data.logs.join('<br>');
+                });
+        }
+        setInterval(updateLogs, 2000); // 每2秒更新一次日志
+        updateLogs(); // 初始加载
+    </script>
 </body>
 </html>
