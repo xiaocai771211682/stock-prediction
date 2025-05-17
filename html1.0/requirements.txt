@@ -1,7 +1,7 @@
-flask==2.0.1
-gunicorn==20.1.0
-pandas==1.5.3
-numpy==1.24.3
-akshare==1.11.45
-ta==0.10.2
-pillow==9.5.0
+flask
+pillow
+akshare
+tushare
+pandas
+numpy
+ta
