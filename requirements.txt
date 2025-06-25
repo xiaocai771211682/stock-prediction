@@ -1,7 +1,7 @@
 flask==2.3.3
 pandas==2.0.3
 numpy==1.26.4
-akshare
+akshare==1.16.72
 tushare==1.4.6
 ta==0.11.0
 pillow==10.4.0
