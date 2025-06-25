@@ -13,8 +13,19 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, request, render_template, send_file, jsonify
-from kivy.logger import Logger
+import logging
 import queue
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # 日志队列
 log_queue = queue.Queue()
@@ -25,7 +36,6 @@ pro = ts.pro_api()
 
 app = Flask(__name__)
 
-# 复制 main.py 中的函数
 def stock_zt_pool(save_directory, date):
     if not os.path.exists(save_directory):
         os.makedirs(save_directory)
@@ -33,17 +43,46 @@ def stock_zt_pool(save_directory, date):
 
     log_queue.put(f"\n正在获取{date}涨停板数据...\n")
     max_retries = 3
+    stock_zt_pool_em_df = None
     for attempt in range(max_retries):
         try:
             stock_zt_pool_em_df = ak.stock_zt_pool_em(date=date)
-            break
+            if not stock_zt_pool_em_df.empty:
+                break
+            log_queue.put(f"AKShare 数据为空 (尝试 {attempt + 1}/{max_retries})，重试中...\n")
+            time.sleep(2)
         except Exception as e:
             if attempt < max_retries - 1:
-                log_queue.put(f"获取数据失败 (尝试 {attempt + 1}/{max_retries}): {e}，重试中...\n")
+                log_queue.put(f"获取 AKShare 数据失败 (尝试 {attempt + 1}/{max_retries}): {e}，重试中...\n")
                 time.sleep(2)
             else:
-                log_queue.put(f"获取数据失败: {e}\n")
-                return None
+                log_queue.put(f"AKShare 获取数据失败: {e}，尝试使用 Tushare...\n")
+                try:
+                    df = pro.limit_list_d(trade_date=date, limit_type='U')
+                    if df.empty:
+                        log_queue.put(f"Tushare: No limit-up stocks found for {date}\n")
+                        return None
+                    df = df.rename(columns={
+                        'ts_code': '代码',
+                        'name': '名称',
+                        'close': '收盘价',
+                        'pct_chg': '涨跌幅',
+                        'amount': '成交额',
+                        'turnover_ratio': '换手率'
+                    })
+                    df['代码'] = df['代码'].str[:6]
+                    df['成交额'] = df['成交额'] * 1000
+                    df['封板资金'] = 0.0
+                    df['主力净流入-净占比'] = 0.0
+                    stock_zt_pool_em_df = df
+                    break
+                except Exception as e2:
+                    log_queue.put(f"Tushare 获取数据失败: {e2}\n")
+                    return None
+
+    if stock_zt_pool_em_df is None or stock_zt_pool_em_df.empty:
+        log_queue.put(f"未获取到有效涨停板数据，日期: {date}\n")
+        return None
 
     sh_mask = stock_zt_pool_em_df['代码'].str.startswith("6") & ~stock_zt_pool_em_df['代码'].str.startswith("688")
     sz_mask = stock_zt_pool_em_df['代码'].str.startswith("0")
@@ -52,8 +91,12 @@ def stock_zt_pool(save_directory, date):
 
     exclude_strings = ["ST", "退", "PT", "N", "C"]
     pattern = '|'.join(exclude_strings)
-    mask = ~filtered_df['名称'].str.contains(pattern)
+    mask = ~filtered_df['名称'].str.contains(pattern, na=False)
     filtered_df = filtered_df[mask].reset_index(drop=True)
+
+    if filtered_df.empty:
+        log_queue.put(f"过滤后无有效股票，日期: {date}\n")
+        return None
 
     filtered_df['主力净流入-净占比'] = 0.00
     log_queue.put(f"找到{len(filtered_df)}只有效涨停股票\n")
@@ -65,13 +108,17 @@ def stock_zt_pool(save_directory, date):
         try:
             market = "sh" if code.startswith("6") else "sz"
             fund_flow = ak.stock_individual_fund_flow(stock=code, market=market)
-            filtered_df.at[index, '主力净流入-净占比'] = fund_flow['主力净流入-净占比'].iloc[-1]
+            if '主力净流入-净占比' in fund_flow.columns:
+                filtered_df.at[index, '主力净流入-净占比'] = fund_flow['主力净流入-净占比'].iloc[-1]
+            else:
+                log_queue.put(f"  {code} 资金流数据无 '主力净流入-净占比' 字段，跳过\n")
         except Exception as e:
             log_queue.put(f"  获取{code}资金流失败：{str(e)}\n")
             continue
 
     filtered_df['封单占成交'] = round(filtered_df['封板资金'] / filtered_df['成交额'] * 100, 2)
-    filtered_df.insert(15, '换手率', filtered_df.pop('换手率'))
+    if '换手率' in filtered_df.columns:
+        filtered_df.insert(15, '换手率', filtered_df.pop('换手率'))
     sorted_df = filtered_df.sort_values(by='主力净流入-净占比', ascending=False)
     return sorted_df
 
@@ -102,7 +149,7 @@ def analyze_single_stock(ts_code, stock_name, start_date, end_date):
         vol_strength = np.where(volume > volume.shift(1), 0.3, -0.3)
         bb_strength = np.where(market_price > bb_upper, 0.4, np.where(market_price < bb_lower, -0.4, 0))
         vpt = volume_price_trend(close=market_price, volume=volume)
-        vpt_strength = (vpt - vpt.shift(1)).fillna(0) / vpt.std() * 0.2
+        vpt_strength = (vpt - vpt.shift(1)).fillna(0) / (vpt.std() if vpt.std() != 0 else 1.0) * 0.2
         prediction_strength = (
             prediction_strength * 0.4 + macd_strength * 0.2 + trend_strength * 0.2 +
             vol_strength * 0.1 + bb_strength * 0.1 + vpt_strength
@@ -135,8 +182,8 @@ def analyze_single_stock(ts_code, stock_name, start_date, end_date):
         trend_reversal = (sma5.shift(1) > sma50.shift(1)) & (sma5 < sma50)
 
         atr = AverageTrueRange(
-            high=df['high'].sort_index(ascending=False),
-            low=df['low'].sort_index(ascending=False),
+            high=df['high'].astype(float).sort_index(ascending=False),
+            low=df['low'].astype(float).sort_index(ascending=False),
             close=market_price,
             window=14
         ).average_true_range()
@@ -257,7 +304,7 @@ def stock_analysis(zt_df, end_date, save_directory):
 
 def generate_screenshot(file_path, output_image_path):
     try:
-        with open(file_path, 'r', encoding='gbk') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         lines = content.split('\n')
         font_size = 20
@@ -265,12 +312,9 @@ def generate_screenshot(file_path, output_image_path):
         max_width = 0
         try:
             font = ImageFont.truetype("simsun.ttc", font_size)
-        except:
-            try:
-                font = ImageFont.truetype("DroidSansFallback.ttf", font_size)
-            except:
-                font = ImageFont.load_default()
-                log_queue.put("警告：未找到合适的字体，使用默认字体，可能影响中文显示\n")
+        except Exception as e:
+            log_queue.put(f"加载字体失败: {str(e)}，使用默认字体\n")
+            font = ImageFont.load_default()
 
         draw = ImageDraw.Draw(Image.new('RGB', (1, 1), 'white'))
         for line in lines:
@@ -381,14 +425,14 @@ def sort_file(input_file, output_dir, end_date):
     output_file = os.path.join(output_dir, f"股票分析结果_{end_date}_排序后.txt")
     codes_only_file = os.path.join(output_dir, f"股票代码_{end_date}_排序后.txt")
 
-    with open(output_file, 'w', encoding='gbk', newline='') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         for i, item in enumerate(stock_data_sorted):
             f.write(item['block'])
             f.write('\n')
             if i < len(stock_data_sorted) - 1:
                 f.write('-' * 50 + '\n\n')
 
-    with open(codes_only_file, 'w', encoding='gbk', newline='') as f:
+    with open(codes_only_file, 'w', encoding='utf-8') as f:
         f.write("代码\n")
         for item in stock_data_sorted:
             f.write(f"{item['stock_code']}\n")
@@ -400,7 +444,6 @@ def sort_file(input_file, output_dir, end_date):
     generate_screenshot(codes_only_file, screenshot_path)
     return screenshot_path
 
-# Web 路由
 @app.route('/')
 def index():
     return render_template('index.html', default_date=datetime.today().strftime('%Y-%m-%d'))
@@ -408,7 +451,7 @@ def index():
 @app.route('/analyze', methods=['POST'])
 def analyze():
     date_str = request.form['date']
-    save_directory = os.path.join(os.getcwd(), "stock_output")
+    save_directory = os.path.join('/tmp', 'stock_output')
     if not os.path.exists(save_directory):
         os.makedirs(save_directory)
 
@@ -416,17 +459,20 @@ def analyze():
         date = datetime.strptime(date_str, '%Y-%m-%d').strftime('%Y%m%d')
         zt_df = stock_zt_pool(save_directory, date)
         if zt_df is None or zt_df.empty:
-            return jsonify({'error': '未获取到有效涨停板数据，终止分析！'})
+            return jsonify({'error': f'未获取到有效涨停板数据，终止分析！日期: {date}'}), 400
 
         analysis_file = stock_analysis(zt_df, date, save_directory)
+        if analysis_file is None:
+            return jsonify({'error': '分析失败，无有效结果！'}), 400
+
         screenshot_path = sort_file(analysis_file, save_directory, date)
         if os.path.exists(screenshot_path):
             return send_file(screenshot_path, as_attachment=True, download_name=f"stock_analysis_{date}.png")
         else:
-            return jsonify({'error': '生成截图失败！'})
+            return jsonify({'error': '生成截图失败！'}), 400
     except Exception as e:
-        log_queue.put(f"\n发生错误：{str(e)}")
-        return jsonify({'error': str(e)})
+        log_queue.put(f"\n发生错误：{str(e)}\n")
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/logs')
 def get_logs():
@@ -436,4 +482,4 @@ def get_logs():
     return jsonify({'logs': logs})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
