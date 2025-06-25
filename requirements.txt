@@ -1,7 +1,7 @@
-flask==2.0.1
-pandas==1.5.3
-numpy==1.24.3
-akshare==1.11.0
-tushare==1.2.89
-ta==0.10.2
-pillow==9.5.0
+flask==2.3.3
+pandas==2.0.3
+numpy==1.26.4
+akshare==1.14.71
+tushare==1.4.6
+ta==0.11.0
+pillow==10.4.0
