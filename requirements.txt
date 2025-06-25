@@ -1,0 +1,7 @@
+flask
+pillow
+akshare
+tushare
+pandas
+numpy
+ta
